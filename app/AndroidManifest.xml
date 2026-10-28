@@ -8,6 +8,13 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- After the TV boots (and after a TV update), checks that Free My TV mode is still as you left it. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <!-- Android 11+: without this list the app can't "see" the other apps (getLeanbackLaunchIntentForPackage
          returns null). The shelf and streaming apps, the live TV apps and, through the <intent>, every TV app
@@ -24,6 +31,8 @@
         <package android:name="com.peacocktv.peacockandroid" />
         <package android:name="com.globo.globotv" />
         <package android:name="com.spotify.tv.android" />
+        <package android:name="app.revanced.android.youtube" />
+        <package android:name="app.revanced.android.gms" />
         <package android:name="com.tcl.tv" />
         <package android:name="com.google.android.tv" />
         <package android:name="com.mediatek.wwtv.tvcenter" />
@@ -90,6 +99,22 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".UsbActivity"
+            android:exported="false"
+            android:label="Pendrive" />
+
+        <activity
+            android:name=".SystemAppsActivity"
+            android:exported="true"
+            android:label="Apps em segundo plano" />
+
+        <provider
+            android:name=".FileUriProvider"
+            android:authorities="io.freemytv.files"
+            android:exported="false"
+            android:grantUriPermissions="true" />
 
         <service
             android:name=".Screensaver"

@@ -18,14 +18,13 @@ import java.nio.ByteOrder;
 final class Click {
     private static final int RATE = 48_000;
     private SoundPool pool;
-    private int move, open;
+    private int open;
 
     Click(Context c) {
         try {
             pool = new SoundPool.Builder().setMaxStreams(3).setAudioAttributes(new AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build()).build();
-            move = pool.load(wav(c, "click-move.wav", 1450f, 0.009f, 0.030f), 1);
             open = pool.load(wav(c, "click-open.wav", 880f, 0.022f, 0.090f), 1);
         } catch (IOException | RuntimeException e) {
             AppLog.w("click sound unavailable: " + e.getMessage());
@@ -34,7 +33,6 @@ final class Click {
     }
 
     void move() {
-        if (pool != null) pool.play(move, 0.14f, 0.14f, 1, 0, 1f);
     }
 
     void open() {

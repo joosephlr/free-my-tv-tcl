@@ -24,9 +24,11 @@ import android.graphics.drawable.Drawable;
 import android.media.tv.TvContract;
 import android.media.tv.TvInputInfo;
 import android.media.tv.TvInputManager;
+import android.net.Uri;
 import android.provider.Settings;
 import android.util.DisplayMetrics;
 import android.view.View;
+import android.widget.Toast;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -56,7 +58,7 @@ final class HomeApps {
 
     static final int APP = 0, LIVE_TV = 1, INPUT = 2, ALL_APPS = 3, SETTINGS = 4, ANDROID_SETTINGS = 5;
     /** The "HDMI Inputs" button: opens the bottom drawer on the inputs (the home screen handles it). */
-    static final int INPUTS = 7;
+    static final int INPUTS = 7, USB = 8, SYSTEM_APPS = 9;
     /** Image size of each card (16:9; on screen it shows up to ~330 px wide). */
     static final int TILE_W = 384, TILE_H = 216;
 
@@ -91,7 +93,7 @@ final class HomeApps {
         {"globoplay", "Globoplay", "com.globo.globotv", "FF5A1F", "tint", "1"},
         {"spotify", "Spotify", "com.spotify.tv.android", "1DB954", "", "1"},
     };
-    static final int MAX_SHELF = 8;
+    static final int MAX_SHELF = 20;
     /** Live TV apps of some brands (the antenna's channels open through the standard Android request first). */
     static final String[] LIVE_TV_APPS = {"com.tcl.tv", "com.google.android.tv", "com.mediatek.wwtv.tvcenter", "com.sony.dtv.tvx"};
     /** Kept out of "All Apps" (only hidden, still installed). Add the ones your TV shows that you never use. */
@@ -124,8 +126,6 @@ final class HomeApps {
         for (String pkg : shelfPackages(c)) {
             if (items.size() >= MAX_SHELF) break;
             Intent launch = launchIntent(pm, pkg);
-            if (launch == null) continue;
-            ResolveInfo ri = pm.resolveActivity(launch, 0);
             String[] d = known(pkg);
             Item it = new Item();
             it.kind = APP;
@@ -133,7 +133,11 @@ final class HomeApps {
             if (d == null) {
                 // An app picked in Settings > Shelf that isn't in SHELF: its own name and TV art.
                 it.key = pkg;
-                it.label = ri != null ? String.valueOf(ri.loadLabel(pm)) : pkg;
+                try {
+                    it.label = String.valueOf(pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)));
+                } catch (PackageManager.NameNotFoundException e) {
+                    continue;
+                }
                 it.tile = appTile(c, null, pkg, 0);
             } else {
                 it.key = d[0];
@@ -172,6 +176,12 @@ final class HomeApps {
         for (String[] d : SHELF) if (launchIntent(pm, d[2]) != null && seen.add(d[2])) out.add(new String[] {d[2], d[1]});
         List<String[]> more = new ArrayList<>();
         Intent query = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
+        for (ResolveInfo ri : pm.queryIntentActivities(query, 0)) {
+            String pkg = ri.activityInfo.packageName;
+            if (pkg.equals(c.getPackageName()) || HIDDEN.contains(pkg) || !seen.add(pkg)) continue;
+            more.add(new String[] {pkg, String.valueOf(ri.loadLabel(pm))});
+        }
+        query = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
         for (ResolveInfo ri : pm.queryIntentActivities(query, 0)) {
             String pkg = ri.activityInfo.packageName;
             if (pkg.equals(c.getPackageName()) || HIDDEN.contains(pkg) || !seen.add(pkg)) continue;
@@ -218,6 +228,7 @@ final class HomeApps {
         items.add(shortcut(ALL_APPS, "all", Ui.tr("Todos os Apps", "All Apps"), "apps"));
         items.add(shortcut(SETTINGS, "settings", Ui.tr("Ajustes do Início", "Home Settings"), "settings"));
         items.add(shortcut(ANDROID_SETTINGS, "tv-settings", Ui.tr("Ajustes da TV", "TV Settings"), "tv_settings"));
+        items.add(shortcut(SYSTEM_APPS, "system-cleanup", Ui.tr("Limpar RAM", "Free RAM"), "memory"));
         return items;
     }
 
@@ -236,6 +247,7 @@ final class HomeApps {
         List<Item> items = new ArrayList<>();
         if (liveTv(c) != null) items.add(shortcut(LIVE_TV, "live", Ui.tr("TV ao Vivo", "Live TV"), "tv"));
         items.addAll(inputs(c, true));
+        items.add(shortcut(USB, "usb", Ui.tr("Pendrive", "USB drive"), "folder"));
         return items;
     }
 
@@ -344,6 +356,18 @@ final class HomeApps {
             it.tile = appTile(c, null, pkg, 0);
             items.add(it);
         }
+        query = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+        for (ResolveInfo ri : pm.queryIntentActivities(query, 0)) {
+            String pkg = ri.activityInfo.packageName;
+            if (skip.contains(pkg) || !seen.add(pkg)) continue;
+            Item it = new Item();
+            it.kind = APP;
+            it.pkg = pkg;
+            it.key = pkg;
+            it.label = String.valueOf(ri.loadLabel(pm));
+            it.tile = appTile(c, null, pkg, 0);
+            items.add(it);
+        }
         Collections.sort(items, (a, b) -> a.label.toLowerCase(Locale.ROOT).compareTo(b.label.toLowerCase(Locale.ROOT)));
         synchronized (HomeApps.class) {
             TILES.keySet().removeIf(k -> k.contains(".") && !seen.contains(k));
@@ -372,15 +396,29 @@ final class HomeApps {
             case INPUT:
                 intent = new Intent(Intent.ACTION_VIEW, TvContract.buildChannelUriForPassthroughInput(it.inputId));
                 break;
+            case USB:
+                intent = new Intent().setComponent(new ComponentName(a, UsbActivity.class));
+                break;
             case SETTINGS:
                 intent = new Intent().setComponent(new ComponentName(a, SettingsActivity.class));
                 break;
             case ANDROID_SETTINGS:
                 intent = new Intent(Settings.ACTION_SETTINGS);
                 break;
+            case SYSTEM_APPS:
+                String result = HomeMode.maintainMemoryNow(a);
+                Toast.makeText(a, result, Toast.LENGTH_LONG).show();
+                if (from != null && from.getContext() instanceof Activity) {
+                    View root = ((Activity) from.getContext()).findViewById(android.R.id.content);
+                    if (root != null && root instanceof HomeView) {
+                        ((HomeView) root).refreshSystemStatsNow();
+                    }
+                }
+                return true;
             default:
                 return false;
         }
+
         if (intent == null) return false;
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         try {
@@ -388,6 +426,31 @@ final class HomeApps {
             return true;
         } catch (ActivityNotFoundException | SecurityException e) {
             AppLog.w("couldn't open " + it.label + ": " + e.getMessage());
+            return false;
+        }
+    }
+
+    /** Opens the Android app-management screen for an item, or the system uninstall confirmation. */
+    static boolean manage(Activity a, Item it, boolean uninstall) {
+        if (it == null || it.kind != APP || it.pkg == null || it.pkg.isEmpty()) return false;
+        Intent intent;
+        if (uninstall) {
+            intent = new Intent(Intent.ACTION_DELETE, Uri.parse("package:" + it.pkg));
+            ResolveInfo handler = a.getPackageManager().resolveActivity(intent, 0);
+            if (handler != null && handler.activityInfo != null) {
+                intent.setComponent(new ComponentName(handler.activityInfo.packageName, handler.activityInfo.name));
+            }
+        } else {
+            intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + it.pkg));
+        }
+        try {
+            a.startActivity(intent);
+            return true;
+        } catch (ActivityNotFoundException | SecurityException e) {
+            AppLog.w("couldn't manage " + it.pkg + ": " + e.getMessage());
+            if (uninstall) {
+                return manage(a, it, false);
+            }
             return false;
         }
     }

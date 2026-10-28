@@ -128,6 +128,7 @@ final class HomeMode {
     static void bootCheck(Context c) {
         ensureRemoteService(c, 30_000);
         ModeJob.schedule(c, ModeJob.VERIFY, null, 45_000);
+        if (FREE.equals(state(c).optString("mode"))) scheduleMaintenance(c, 60_000);
     }
 
     /** After an update of this app: complete Free My TV mode if anything is missing. */
@@ -275,6 +276,7 @@ final class HomeMode {
             done(c, null);
             adb.shell("am start -a android.intent.action.MAIN -c android.intent.category.HOME");
             ModeJob.schedule(c, ModeJob.MEMORY, FREE, 120_000);
+            scheduleMaintenance(c, 30 * 60_000L);
         } catch (Exception e) {
             done(c, Ui.tr("Não deu para ligar o Free My TV: ", "Couldn't turn on Free My TV: ") + (Ui.ru ? Russian.text(e.getMessage() == null ? "" : e.getMessage()) : e.getMessage()));
         }
@@ -461,12 +463,12 @@ final class HomeMode {
     /** The home screen in use now ("package/activity"): the HOME role holder, among the TV's home screens. */
     private static String currentHome(Adb adb) throws IOException {
         String holder = homeHolder(adb);
-        if (holder.isEmpty() || holder.contains(PKG)) return null;
         String list = adb.shell("cmd package query-activities --brief --user 0 -a android.intent.action.MAIN"
                 + " -c android.intent.category.HOME");
         for (String line : list.split("\n")) {
             line = line.trim();
-            if (line.startsWith(holder + "/")) return line;
+            if (!line.contains("/") || line.startsWith(PKG + "/")) continue;
+            if (holder.isEmpty() || line.startsWith(holder + "/")) return line;
         }
         return null;
     }
@@ -602,6 +604,62 @@ final class HomeMode {
                 AppLog.w("memory measurement failed: " + e.getMessage());
             }
         }
+    }
+
+    private static void scheduleMaintenance(Context c, long delayMs) {
+        if (FREE.equals(state(c).optString("mode"))) {
+            ModeJob.schedule(c, ModeJob.MAINTENANCE, FREE, delayMs);
+        }
+    }
+
+    /** Stops only idle third-party apps; it never clears data or touches the app in the foreground. */
+    static String maintainMemoryNow(Context c) {
+        if (!FREE.equals(state(c).optString("mode"))) {
+            String msg = Ui.tr("Não é possível limpar RAM porque o Free My TV não está ativo.",
+                    "I can't free RAM because Free My TV isn't active.");
+            notice(c, msg);
+            return msg;
+        }
+        try (Adb adb = Adb.connect(c, 10_000, null)) {
+            String foreground = foregroundPackage(adb);
+            if (foreground == null || foreground.isEmpty()) {
+                String msg = Ui.tr("Nenhum app em segundo plano foi parado: o app em primeiro plano não foi identificado.",
+                        "No background app was stopped: the foreground app could not be identified.");
+                AppLog.w("memory maintenance skipped: foreground app was unknown");
+                notice(c, msg);
+                scheduleMaintenance(c, 30 * 60_000L);
+                return msg;
+            }
+            int stopped = 0;
+            for (String pkg : packages(adb, "-3")) {
+                if (PKG.equals(pkg) || PROTECTED.contains(pkg) || pkg.equals(foreground)) continue;
+                String result = adb.shell("am force-stop " + pkg);
+                if (result.trim().isEmpty()) stopped++;
+                else AppLog.w("could not stop idle app " + pkg + ": " + result.trim());
+            }
+            String msg = stopped > 0
+                    ? Ui.tr("Limpeza concluída: " + stopped + " app(s) em segundo plano foram fechados para liberar RAM.",
+                            "Cleanup finished: " + stopped + " background app(s) were closed to free RAM.")
+                    : Ui.tr("Limpeza concluída: nenhum app em segundo plano foi fechado; o sistema já estava estável.",
+                            "Cleanup finished: no background app was closed; the system was already stable.");
+            AppLog.w("memory maintenance stopped " + stopped + " idle third-party apps");
+            notice(c, msg);
+            scheduleMaintenance(c, 30 * 60_000L);
+            return msg;
+        } catch (Exception e) {
+            String error = Ui.tr("Não foi possível limpar RAM: ", "Couldn't free RAM: ")
+                    + (Ui.ru ? Russian.text(e.getMessage() == null ? "" : e.getMessage()) : e.getMessage());
+            AppLog.w("memory maintenance failed: " + e.getMessage());
+            notice(c, error);
+            scheduleMaintenance(c, 30 * 60_000L);
+            return error;
+        }
+    }
+
+    private static String foregroundPackage(Adb adb) throws IOException {
+        String output = adb.shell("dumpsys activity activities");
+        Matcher m = Pattern.compile("(?:topResumedActivity|mResumedActivity)=.*?\\bu\\d+\\s+([\\w.]+)/").matcher(output);
+        return m.find() ? m.group(1) : null;
     }
 
     private static void measureMemory(Context c, Adb adb, String mode) throws IOException, JSONException {

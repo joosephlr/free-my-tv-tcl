@@ -30,7 +30,7 @@ before you do it, and let them do the taps on the TV.
 5. **Build:** `./build.sh` → `FreeMyTV.apk`. Keep `freemytv.keystore`: updates must be signed with the same key.
 6. **Install:** `adb connect <IP>:5555`. The TV asks *Allow USB debugging?*: tell them to accept and tick *Always
    allow*. Then `adb install -r FreeMyTV.apk`. On TCL, also `adb shell "appops set io.freemytv AUTO_START allow || appops set io.freemytv APP_AUTO_START allow"`
-   (some firmware calls the operation `APP_AUTO_START`; this tries both):
+   (some firmware calls the operation `APP_AUTO_START`; this tries both): 
    TCL's `TclAppBoot` blocks background jobs by default, so the switch (and the watchdog) never run. The log shows
    `forbid bind service ... ModeJob`.
 7. **Tell them what the switch does** before they make it: the home screen and screensaver change, a short list of

@@ -221,6 +221,10 @@ final class Scene {
     }
 
     void drawBackground(Canvas c) {
+        if (Prefs.theme().equals("oled")) {
+            c.drawColor(Color.BLACK);
+            return;
+        }
         if (aurora == null) {
             if (fallback.getShader() == null) applyPalette();
             c.drawRect(0, 0, w, h, fallback);

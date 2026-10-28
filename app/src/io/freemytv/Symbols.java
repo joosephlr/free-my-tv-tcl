@@ -30,9 +30,10 @@ final class Symbols {
 
     static Bitmap get(Context c, String name) {
         synchronized (CACHE) {
-            if (CACHE.containsKey(name)) return CACHE.get(name);
+            String asset = alias(name);
+            if (CACHE.containsKey(asset)) return CACHE.get(asset);
             Bitmap b = null;
-            try (InputStream in = c.getAssets().open("symbols/" + name + ".png")) {
+            try (InputStream in = c.getAssets().open("symbols/" + asset + ".png")) {
                 b = BitmapFactory.decodeStream(in);
                 if (b != null) {
                     b = b.extractAlpha();
@@ -40,9 +41,18 @@ final class Symbols {
                 }
             } catch (IOException ignored) {
             }
-            CACHE.put(name, b);
+            CACHE.put(asset, b);
             return b;
         }
+    }
+
+    private static String alias(String name) {
+        // Some icons are still referred to by their logical names ("folder", "memory") even though the generated
+        // asset names are limited to the current Material Symbols set. Keep the app UI consistent by falling back to
+        // established symbols that exist in assets/symbols.
+        if ("folder".equals(name)) return "apps";
+        if ("memory".equals(name)) return "sync";
+        return name;
     }
 
     static float width(Context c, String name, float pointSize) {

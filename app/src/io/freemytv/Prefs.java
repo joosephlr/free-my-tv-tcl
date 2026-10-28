@@ -73,10 +73,10 @@ final class Prefs {
 
     static void setTemperature(String v) { put("temperature", v); }
 
-    /** "auto" (dark from sunset to sunrise), "light" or "dark". */
+    /** "auto" (dark from sunset to sunrise), "light", "dark" or "oled". */
     static String theme() {
         String v = sp().getString("theme", "auto");
-        return v.equals("light") || v.equals("dark") ? v : "auto";
+        return v.equals("light") || v.equals("dark") || v.equals("oled") ? v : "auto";
     }
 
     static void setTheme(String v) { put("theme", v); }

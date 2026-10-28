@@ -291,7 +291,7 @@ final class HomeData {
      */
     boolean isNight(long now) {
         String theme = Prefs.theme();
-        if (theme.equals("dark")) return true;
+        if (theme.equals("dark") || theme.equals("oled")) return true;
         if (theme.equals("light")) return false;
         long t = Shaders.timeOfDay(now, 0);
         long rise = Shaders.timeOfDay(weather.sunrise, 6 * 60 * 60_000L);
