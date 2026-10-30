@@ -27,7 +27,9 @@ import android.text.TextPaint;
 import android.text.TextUtils;
 import android.view.Choreographer;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.accessibility.AccessibilityManager;
 import android.view.accessibility.AccessibilityNodeProvider;
@@ -207,6 +209,18 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         else startReorder();
     };
 
+    // Touch and mouse input
+    private final float touchSlop;
+    private float touchDownX, touchDownY;
+    private long touchDownTime;
+    private boolean mouseLongPressed;
+    private final Runnable mouseHoldStart = () -> {
+        if (mouseLongPressed) return;
+        mouseLongPressed = true;
+        if (isAppActionsHold()) showAppActions();
+        else if (canReorder()) startReorder();
+    };
+
     // Corner capsule
     private List<HomeApps.Item> statusItems = new ArrayList<>();
     private Spring[] statusFocus = new Spring[0];
@@ -381,6 +395,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         ui = a.getSharedPreferences("home-ui", Context.MODE_PRIVATE);
         tvInputs = (TvInputManager) a.getSystemService(Context.TV_INPUT_SERVICE);
         setFocusable(true);
+        setClickable(true);
+        touchSlop = Math.max(16f, ViewConfiguration.get(a).getScaledTouchSlop());
         sky = new Layer(a, SKY);
         heroLayer = new Layer(a, HERO);
         status = new Layer(a, STATUS);
@@ -454,6 +470,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         running = false;
         cancelReorder(true);
         handler.removeCallbacks(holdStart);
+        handler.removeCallbacks(mouseHoldStart);
+        mouseLongPressed = false;
         okHeld = holdArmed = false;
         Choreographer.getInstance().removeFrameCallback(this);
         handler.removeCallbacks(tick);
@@ -2048,6 +2066,426 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             return;
         }
         click.move();
+    }
+
+    // MARK: - Touch and Mouse Input
+
+    @Override public boolean onInterceptTouchEvent(MotionEvent ev) {
+        return true;
+    }
+
+    @Override public boolean dispatchHoverEvent(MotionEvent ev) {
+        int action = ev.getActionMasked();
+        if (action == MotionEvent.ACTION_HOVER_MOVE || action == MotionEvent.ACTION_HOVER_ENTER) {
+            wake();
+            handleHover(ev.getX(), ev.getY());
+            return true;
+        }
+        return super.dispatchHoverEvent(ev);
+    }
+
+    @Override public boolean dispatchGenericMotionEvent(MotionEvent ev) {
+        if (ev.getActionMasked() == MotionEvent.ACTION_SCROLL) {
+            float vscroll = ev.getAxisValue(MotionEvent.AXIS_VSCROLL);
+            if (Math.abs(vscroll) > 0.01f) {
+                wake();
+                handleScroll(vscroll);
+                return true;
+            }
+        }
+        if (ev.getActionButton() == MotionEvent.BUTTON_SECONDARY) {
+            back();
+            return true;
+        }
+        return super.dispatchGenericMotionEvent(ev);
+    }
+
+    @Override public boolean onTouchEvent(MotionEvent ev) {
+        wake();
+        int action = ev.getActionMasked();
+        boolean isRightClick = ev.getActionButton() == MotionEvent.BUTTON_SECONDARY
+                || (ev.getButtonState() & MotionEvent.BUTTON_SECONDARY) != 0;
+
+        if (action == MotionEvent.ACTION_DOWN) {
+            touchDownX = ev.getX();
+            touchDownY = ev.getY();
+            touchDownTime = SystemClock.uptimeMillis();
+            mouseLongPressed = false;
+            handler.removeCallbacks(mouseHoldStart);
+
+            if (isRightClick) {
+                back();
+                return true;
+            }
+
+            handleHover(touchDownX, touchDownY);
+
+            boolean canHold = (sheetOpen && canManageApp()) || (!sheetOpen && zone == Z_SHELF && canReorder());
+            if (canHold) {
+                handler.postDelayed(mouseHoldStart, HOLD_MS);
+            }
+            return true;
+        }
+
+        if (action == MotionEvent.ACTION_MOVE) {
+            float dist = (float) Math.hypot(ev.getX() - touchDownX, ev.getY() - touchDownY);
+            if (dist > touchSlop) {
+                handler.removeCallbacks(mouseHoldStart);
+            }
+            if (reordering) {
+                handleHover(ev.getX(), ev.getY());
+            }
+            return true;
+        }
+
+        if (action == MotionEvent.ACTION_UP) {
+            handler.removeCallbacks(mouseHoldStart);
+            if (mouseLongPressed) {
+                mouseLongPressed = false;
+                return true;
+            }
+
+            if (isRightClick) {
+                back();
+                return true;
+            }
+
+            float dx = ev.getX() - touchDownX;
+            float dy = ev.getY() - touchDownY;
+            float dist = (float) Math.hypot(dx, dy);
+
+            if (dist <= touchSlop) {
+                handleClick(ev.getX(), ev.getY());
+            } else {
+                if (sheetOpen) {
+                    if (Math.abs(dy) > 30 * k) {
+                        int rows = Math.max(1, (others.size() + COLUMNS - 1) / COLUMNS);
+                        int visible = Math.min(rows, VISIBLE_ROWS);
+                        float target = scroll.target + (dy < 0 ? 1 : -1);
+                        scroll.target = Math.max(0, Math.min(rows - visible, target));
+                        wake();
+                    }
+                } else {
+                    if (!drawerOpen && dy < -50 * k) {
+                        openDrawer();
+                        retarget(false);
+                        click.move();
+                    } else if (drawerOpen && dy > 50 * k) {
+                        closeDrawer();
+                        retarget(false);
+                        click.move();
+                    }
+                }
+            }
+            return true;
+        }
+
+        if (action == MotionEvent.ACTION_CANCEL) {
+            handler.removeCallbacks(mouseHoldStart);
+            mouseLongPressed = false;
+            return true;
+        }
+
+        return super.onTouchEvent(ev);
+    }
+
+    private int findGridItemAt(float x, float y) {
+        if (!sheetOpen || others.isEmpty()) return -1;
+        float gridWidth = COLUMNS * GRID_W + (COLUMNS - 1) * GRID_GAP;
+        float left = (1920 - gridWidth) / 2 * k;
+        float gridTop = GRID_TOP * k;
+        float shift = scroll.value * GRID_ROW * k;
+        int n = others.size();
+        for (int i = 0; i < n; i++) {
+            int r = i / COLUMNS, col = i % COLUMNS;
+            float top = gridTop + r * GRID_ROW * k - shift;
+            float bottom = top + (GRID_H + 40) * k;
+            if (bottom < 0 || top > h) continue;
+            float cellLeft = left + col * (GRID_W + GRID_GAP) * k;
+            float cellRight = cellLeft + GRID_W * k;
+            if (x >= cellLeft && x <= cellRight && y >= top && y <= bottom) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private int findDrawerItemAt(float x, float y) {
+        if (!drawerOpen || drawerItems.isEmpty()) return -1;
+        for (int i = 0; i < drawerItems.size(); i++) {
+            if (i < drawerRects.length && drawerRects[i].contains(x, y)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private int findShelfItemAt(float x, float y) {
+        if (shelf.isEmpty()) return -1;
+        for (int i = 0; i < shelf.size(); i++) {
+            if (i < tileRects.length && tileRects[i].contains(x, y)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private int findTopButtonAt(float x, float y) {
+        for (int i = 0; i < lightButtons.size(); i++) {
+            int idx = 3 + i;
+            if (idx < topRects.length) {
+                RectF r = topRects[idx];
+                float pad = 12 * k;
+                if (x >= r.left - pad && x <= r.right + pad && y >= r.top - pad && y <= r.bottom + pad) {
+                    return idx;
+                }
+            }
+        }
+        return -1;
+    }
+
+    private int findTopTabAt(float x, float y) {
+        if (!picksOn()) return -1;
+        for (int i = 0; i < 3; i++) {
+            if (i < topRects.length && topRects[i].contains(x, y)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private int findCardAt(float x, float y) {
+        if (!picksOn() || cards.isEmpty()) return -1;
+        int count = Math.min(cards.size(), 3);
+        for (int i = 0; i < count; i++) {
+            if (i < cardRects.length && cardRects[i].contains(x, y)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private int findStatusItemAt(float x, float y) {
+        if (statusItems.isEmpty()) return -1;
+        for (int i = 0; i < statusItems.size(); i++) {
+            if (i < statusRects.length && statusRects[i].contains(x, y)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private void handleClick(float x, float y) {
+        wake();
+        if (reordering) {
+            dropReorder();
+            retarget(false);
+            click.open();
+            return;
+        }
+
+        if (sheetOpen) {
+            int gridIdx = findGridItemAt(x, y);
+            if (gridIdx >= 0) {
+                gridIndex = gridIdx;
+                retargetGrid(false);
+                activate();
+            } else {
+                closeSheet();
+            }
+            return;
+        }
+
+        if (drawerOpen) {
+            int drawerIdx = findDrawerItemAt(x, y);
+            if (drawerIdx >= 0) {
+                drawerIndex = drawerIdx;
+                zone = Z_DRAWER;
+                retarget(false);
+                activate();
+                return;
+            }
+            if (Prefs.weather() && weatherCard.contains(x, y)) return;
+            if (Prefs.quotes() && HomeData.active().length > 0 && quotesCard.contains(x, y)) return;
+
+            if (y < ROW_TOP * k - 20 * k) {
+                closeDrawer();
+                retarget(false);
+                click.move();
+            }
+            return;
+        }
+
+        // 1. Shelf apps
+        int shelfIdx = findShelfItemAt(x, y);
+        if (shelfIdx >= 0) {
+            shelfIndex = shelfIdx;
+            zone = Z_SHELF;
+            retarget(false);
+            activate();
+            return;
+        }
+
+        // 2. Top buttons
+        int buttonIdx = findTopButtonAt(x, y);
+        if (buttonIdx >= 0) {
+            topIndex = buttonIdx;
+            zone = Z_TOP;
+            retarget(false);
+            activate();
+            return;
+        }
+
+        // 3. Top tabs
+        int tabIdx = findTopTabAt(x, y);
+        if (tabIdx >= 0) {
+            selectTab(tabIdx);
+            topIndex = tabIdx;
+            zone = Z_TOP;
+            retarget(false);
+            click.move();
+            return;
+        }
+
+        // 4. Recommendation cards
+        int cardIdx = findCardAt(x, y);
+        if (cardIdx >= 0) {
+            cardIndex = cardIdx;
+            zone = Z_CARDS;
+            retarget(false);
+            activate();
+            return;
+        }
+
+        // 5. Corner capsule status items
+        int statusIdx = findStatusItemAt(x, y);
+        if (statusIdx >= 0) {
+            statusIndex = statusIdx;
+            zone = Z_STATUS;
+            retarget(false);
+            activate();
+            return;
+        }
+
+        // 6. Hero button
+        if (hero != null && hero.button && heroButton.contains(x, y)) {
+            zone = Z_HERO;
+            retarget(false);
+            activate();
+            return;
+        }
+    }
+
+    private void handleHover(float x, float y) {
+        if (reordering) {
+            int targetIdx = findShelfItemAt(x, y);
+            if (targetIdx >= 0 && targetIdx != shelfIndex) {
+                shiftReorder(targetIdx > shelfIndex ? 1 : -1);
+            }
+            return;
+        }
+
+        if (sheetOpen) {
+            int gridIdx = findGridItemAt(x, y);
+            if (gridIdx >= 0 && gridIdx != gridIndex) {
+                gridIndex = gridIdx;
+                retargetGrid(false);
+                gridDirty = true;
+                wake();
+            }
+            return;
+        }
+
+        if (drawerOpen) {
+            int drawerIdx = findDrawerItemAt(x, y);
+            if (drawerIdx >= 0 && (zone != Z_DRAWER || drawerIndex != drawerIdx)) {
+                drawerIndex = drawerIdx;
+                zone = Z_DRAWER;
+                retarget(false);
+                wake();
+            }
+            return;
+        }
+
+        int shelfIdx = findShelfItemAt(x, y);
+        if (shelfIdx >= 0) {
+            if (zone != Z_SHELF || shelfIndex != shelfIdx) {
+                shelfIndex = shelfIdx;
+                zone = Z_SHELF;
+                retarget(false);
+                wake();
+            }
+            return;
+        }
+
+        int buttonIdx = findTopButtonAt(x, y);
+        if (buttonIdx >= 0) {
+            if (zone != Z_TOP || topIndex != buttonIdx) {
+                topIndex = buttonIdx;
+                zone = Z_TOP;
+                retarget(false);
+                wake();
+            }
+            return;
+        }
+
+        int tabIdx = findTopTabAt(x, y);
+        if (tabIdx >= 0) {
+            if (zone != Z_TOP || topIndex != tabIdx) {
+                topIndex = tabIdx;
+                zone = Z_TOP;
+                retarget(false);
+                wake();
+            }
+            return;
+        }
+
+        int cardIdx = findCardAt(x, y);
+        if (cardIdx >= 0) {
+            if (zone != Z_CARDS || cardIndex != cardIdx) {
+                cardIndex = cardIdx;
+                zone = Z_CARDS;
+                retarget(false);
+                wake();
+            }
+            return;
+        }
+
+        int statusIdx = findStatusItemAt(x, y);
+        if (statusIdx >= 0) {
+            if (zone != Z_STATUS || statusIndex != statusIdx) {
+                statusIndex = statusIdx;
+                zone = Z_STATUS;
+                retarget(false);
+                wake();
+            }
+            return;
+        }
+    }
+
+    private void handleScroll(float vscroll) {
+        wake();
+        if (sheetOpen) {
+            int rows = Math.max(1, (others.size() + COLUMNS - 1) / COLUMNS);
+            int visible = Math.min(rows, VISIBLE_ROWS);
+            float target = scroll.target + (vscroll < 0 ? 1 : -1);
+            scroll.target = Math.max(0, Math.min(rows - visible, target));
+            return;
+        }
+
+        if (vscroll < 0) {
+            if (!drawerOpen) {
+                openDrawer();
+                retarget(false);
+                click.move();
+            }
+        } else if (vscroll > 0) {
+            if (drawerOpen) {
+                closeDrawer();
+                retarget(false);
+                click.move();
+            }
+        }
     }
 
     private void move(int dx, int dy) {

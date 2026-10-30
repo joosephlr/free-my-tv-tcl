@@ -22,6 +22,7 @@ import android.text.TextPaint;
 import android.text.TextUtils;
 import android.view.Choreographer;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.accessibility.AccessibilityNodeProvider;
 import android.view.inputmethod.EditorInfo;
@@ -620,6 +621,106 @@ public class SettingsActivity extends Activity {
                 default:
                     return false;
             }
+        }
+
+        private int findRowAt(float x, float y) {
+            int count = rowCount();
+            for (int i = 0; i < count; i++) {
+                float ry, rh;
+                if (screen == MAIN) {
+                    ry = (LIST_TOP + i * (ROW_H + ROW_GAP)) * k;
+                    rh = ROW_H * k;
+                } else if (screen == HOME_CHOICE) {
+                    ry = (LIST_TOP + i * (CHOICE_H + ROW_GAP)) * k;
+                    rh = CHOICE_H * k;
+                } else {
+                    ry = (LIST_TOP + 20 + i * (LIST_ROW_H + LIST_ROW_GAP)) * k;
+                    rh = LIST_ROW_H * k;
+                }
+                if (x >= LIST_X * k && x <= LIST_R * k && y >= ry && y <= ry + rh) {
+                    return i;
+                }
+            }
+            return -1;
+        }
+
+        @Override public boolean onTouchEvent(MotionEvent ev) {
+            int action = ev.getActionMasked();
+            boolean isRightClick = ev.getActionButton() == MotionEvent.BUTTON_SECONDARY
+                    || (ev.getButtonState() & MotionEvent.BUTTON_SECONDARY) != 0;
+            if (action == MotionEvent.ACTION_DOWN) {
+                if (isRightClick) {
+                    triggerBack();
+                    return true;
+                }
+                int row = findRowAt(ev.getX(), ev.getY());
+                if (row >= 0) {
+                    focus = row;
+                    invalidate();
+                    spoken.focusMoved();
+                }
+                return true;
+            }
+            if (action == MotionEvent.ACTION_UP) {
+                if (isRightClick) {
+                    triggerBack();
+                    return true;
+                }
+                int row = findRowAt(ev.getX(), ev.getY());
+                if (row >= 0) {
+                    focus = row;
+                    invalidate();
+                    spoken.focusMoved();
+                    activate();
+                    return true;
+                }
+            }
+            return super.onTouchEvent(ev);
+        }
+
+        private void triggerBack() {
+            if (screen == MAIN) {
+                activity.finish();
+            } else {
+                KeyEvent d = new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BACK);
+                KeyEvent u = new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BACK);
+                onKey(d);
+                onKey(u);
+            }
+        }
+
+        @Override public boolean onGenericMotionEvent(MotionEvent ev) {
+            if (ev.getActionMasked() == MotionEvent.ACTION_SCROLL) {
+                float vscroll = ev.getAxisValue(MotionEvent.AXIS_VSCROLL);
+                if (vscroll < 0) {
+                    onKey(new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_DOWN));
+                    onKey(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DPAD_DOWN));
+                    return true;
+                } else if (vscroll > 0) {
+                    onKey(new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_UP));
+                    onKey(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DPAD_UP));
+                    return true;
+                }
+            }
+            if (ev.getActionButton() == MotionEvent.BUTTON_SECONDARY) {
+                triggerBack();
+                return true;
+            }
+            return super.onGenericMotionEvent(ev);
+        }
+
+        @Override public boolean dispatchHoverEvent(MotionEvent ev) {
+            int action = ev.getActionMasked();
+            if (action == MotionEvent.ACTION_HOVER_MOVE || action == MotionEvent.ACTION_HOVER_ENTER) {
+                int row = findRowAt(ev.getX(), ev.getY());
+                if (row >= 0 && row != focus) {
+                    focus = row;
+                    invalidate();
+                    spoken.focusMoved();
+                }
+                return true;
+            }
+            return super.dispatchHoverEvent(ev);
         }
 
         // MARK: - Home Settings and Remote Buttons
