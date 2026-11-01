@@ -28,7 +28,7 @@ import android.widget.Toast;
  */
 final class MouseToggle {
     private static final long DOUBLE_CLICK_WINDOW_MS = 650;
-    private static final long INACTIVITY_TIMEOUT_MS = 60_000;
+    private static final long INACTIVITY_TIMEOUT_MS = 6_000;
 
     private final AccessibilityService service;
     private final WindowManager windowManager;
@@ -91,6 +91,9 @@ final class MouseToggle {
                     windowManager.updateViewLayout(cursorView, params);
                 } catch (Exception ignored) {}
             }
+
+            handler.removeCallbacks(inactivityTimeout);
+            handler.postDelayed(inactivityTimeout, INACTIVITY_TIMEOUT_MS);
 
             handler.postDelayed(this, 16);
         }
