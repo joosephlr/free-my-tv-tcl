@@ -21,8 +21,13 @@ public class RemoteKeyService extends AccessibilityService {
     private final BroadcastReceiver toggleReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            AppLog.w("RemoteKeyService toggle broadcast received");
-            getMouseToggle().toggle(true);
+            String action = intent.getAction();
+            AppLog.w("RemoteKeyService broadcast received: " + action);
+            if ("io.freemytv.action.TOGGLE_MOUSE".equals(action)) {
+                getMouseToggle().toggle(true);
+            } else if ("io.freemytv.action.TEST_CLICK".equals(action)) {
+                getMouseToggle().testClick();
+            }
         }
     };
 
@@ -35,7 +40,9 @@ public class RemoteKeyService extends AccessibilityService {
     public void onCreate() {
         super.onCreate();
         AppLog.w("RemoteKeyService onCreate");
-        IntentFilter filter = new IntentFilter("io.freemytv.action.TOGGLE_MOUSE");
+        IntentFilter filter = new IntentFilter();
+        filter.addAction("io.freemytv.action.TOGGLE_MOUSE");
+        filter.addAction("io.freemytv.action.TEST_CLICK");
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(toggleReceiver, filter, Context.RECEIVER_EXPORTED);
         } else {

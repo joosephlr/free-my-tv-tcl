@@ -9,14 +9,17 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.PixelFormat;
+import android.graphics.Rect;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.util.DisplayMetrics;
+import android.view.Display;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowManager;
+import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.Toast;
 
 /**
@@ -41,9 +44,56 @@ final class MouseToggle {
     private long lastVoicePressTime = 0;
     private long lastBackPressTime = 0;
 
+    private boolean dpadUp = false;
+    private boolean dpadDown = false;
+    private boolean dpadLeft = false;
+    private boolean dpadRight = false;
+    private long holdStartTime = 0;
+    private long okPressDownTime = 0;
+
     private final Runnable singleVoicePressFallback;
     private final Runnable inactivityTimeout = () -> {
         if (active) toggle(false);
+    };
+
+    private final Runnable moveLoop = new Runnable() {
+        @Override
+        public void run() {
+            if (!active || (!dpadUp && !dpadDown && !dpadLeft && !dpadRight)) return;
+
+            long now = SystemClock.uptimeMillis();
+            long elapsed = now - holdStartTime;
+
+            // Speed calculation:
+            // Starts at 5px per tick (~300px/s) for the first 120ms (fine precision)
+            // Accelerates smoothly up to 32px per tick (~1920px/s) over ~1.1 seconds
+            float speed;
+            if (elapsed < 120) {
+                speed = 5.0f;
+            } else {
+                float progress = Math.min(1.0f, (elapsed - 120) / 1100f);
+                speed = 5.0f + progress * progress * 27.0f;
+            }
+
+            float dx = 0, dy = 0;
+            if (dpadUp) dy -= speed;
+            if (dpadDown) dy += speed;
+            if (dpadLeft) dx -= speed;
+            if (dpadRight) dx += speed;
+
+            cursorX = Math.max(0, Math.min(screenWidth - 10, cursorX + dx));
+            cursorY = Math.max(0, Math.min(screenHeight - 10, cursorY + dy));
+
+            if (viewAttached) {
+                params.x = (int) cursorX;
+                params.y = (int) cursorY;
+                try {
+                    windowManager.updateViewLayout(cursorView, params);
+                } catch (Exception ignored) {}
+            }
+
+            handler.postDelayed(this, 16);
+        }
     };
 
     MouseToggle(AccessibilityService service) {
@@ -155,20 +205,21 @@ final class MouseToggle {
             case KeyEvent.KEYCODE_DPAD_DOWN:
             case KeyEvent.KEYCODE_DPAD_LEFT:
             case KeyEvent.KEYCODE_DPAD_RIGHT:
-                if (down) {
-                    float speed = Math.min(55f, 18f + event.getRepeatCount() * 4f);
-                    if (keyCode == KeyEvent.KEYCODE_DPAD_UP) cursorY = Math.max(0, cursorY - speed);
-                    else if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) cursorY = Math.min(screenHeight, cursorY + speed);
-                    else if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) cursorX = Math.max(0, cursorX - speed);
-                    else if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) cursorX = Math.min(screenWidth, cursorX + speed);
+                boolean wasMoving = dpadUp || dpadDown || dpadLeft || dpadRight;
+                if (keyCode == KeyEvent.KEYCODE_DPAD_UP) dpadUp = down;
+                else if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) dpadDown = down;
+                else if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) dpadLeft = down;
+                else if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) dpadRight = down;
 
-                    params.x = (int) cursorX;
-                    params.y = (int) cursorY;
-                    if (viewAttached) {
-                        try {
-                            windowManager.updateViewLayout(cursorView, params);
-                        } catch (Exception ignored) {}
+                boolean isMoving = dpadUp || dpadDown || dpadLeft || dpadRight;
+                if (isMoving) {
+                    if (!wasMoving) {
+                        holdStartTime = SystemClock.uptimeMillis();
+                        handler.removeCallbacks(moveLoop);
+                        moveLoop.run();
                     }
+                } else {
+                    handler.removeCallbacks(moveLoop);
                 }
                 return true;
 
@@ -176,10 +227,14 @@ final class MouseToggle {
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_NUMPAD_ENTER:
                 if (down) {
-                    if (event.getRepeatCount() == 0) cursorView.setPressed(true);
+                    if (event.getRepeatCount() == 0) {
+                        okPressDownTime = SystemClock.uptimeMillis();
+                        cursorView.setPressed(true);
+                    }
                 } else {
                     cursorView.setPressed(false);
-                    clickAt(cursorX, cursorY);
+                    long pressDuration = SystemClock.uptimeMillis() - okPressDownTime;
+                    clickAt(cursorX + 6, cursorY + 6, pressDuration >= 500);
                 }
                 return true;
 
@@ -198,9 +253,18 @@ final class MouseToggle {
         }
     }
 
+    void testClick() {
+        clickAt(cursorX + 6, cursorY + 6, false);
+    }
+
     void toggle(boolean showToast) {
         active = !active;
         AppLog.w("MouseToggle active: " + active);
+        dpadUp = false;
+        dpadDown = false;
+        dpadLeft = false;
+        dpadRight = false;
+        handler.removeCallbacks(moveLoop);
         handler.removeCallbacks(inactivityTimeout);
         handler.post(() -> {
             if (active) {
@@ -241,12 +305,20 @@ final class MouseToggle {
         });
     }
 
-    private void clickAt(float x, float y) {
-        AppLog.w("clickAt (" + x + ", " + y + ")");
+    private void clickAt(float x, float y, boolean longPress) {
+        AppLog.w("clickAt (" + x + ", " + y + ") longPress=" + longPress);
+        // Try clicking the UI accessibility node at the cursor position
+        boolean nodeClicked = clickNodeAt(x, y, longPress);
+        AppLog.w("clickAt: nodeClicked=" + nodeClicked);
+
+        // Also dispatch standard touch gesture stroke
         Path clickPath = new Path();
         clickPath.moveTo(x, y);
+        clickPath.lineTo(x, y + 1f); // Essential: non-zero length stroke prevents Android onCancelled
         GestureDescription.Builder builder = new GestureDescription.Builder();
-        builder.addStroke(new GestureDescription.StrokeDescription(clickPath, 0, 50));
+        builder.setDisplayId(Display.DEFAULT_DISPLAY);
+        long duration = longPress ? 600 : 80;
+        builder.addStroke(new GestureDescription.StrokeDescription(clickPath, 0, duration));
         service.dispatchGesture(builder.build(), new AccessibilityService.GestureResultCallback() {
             @Override public void onCompleted(GestureDescription gestureDescription) {
                 AppLog.w("clickAt completed");
@@ -257,6 +329,60 @@ final class MouseToggle {
         }, handler);
     }
 
+    private boolean clickNodeAt(float x, float y, boolean longPress) {
+        try {
+            AccessibilityNodeInfo root = service.getRootInActiveWindow();
+            if (root == null) {
+                AppLog.w("clickNodeAt: getRootInActiveWindow returned null");
+                return false;
+            }
+            AccessibilityNodeInfo target = findClickableNodeAt(root, (int) x, (int) y);
+            if (target != null) {
+                int action = longPress ? AccessibilityNodeInfo.ACTION_LONG_CLICK : AccessibilityNodeInfo.ACTION_CLICK;
+                boolean success = target.performAction(action);
+                if (!success) {
+                    AccessibilityNodeInfo parent = target.getParent();
+                    if (parent != null) {
+                        success = parent.performAction(action);
+                    }
+                }
+                AppLog.w("clickNodeAt: performed " + (longPress ? "LONG_CLICK" : "CLICK")
+                        + " on " + target.getClassName() + " -> " + success);
+                if (!success && !longPress) {
+                    target.performAction(AccessibilityNodeInfo.ACTION_SELECT);
+                    target.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+                }
+                return success;
+            } else {
+                AppLog.w("clickNodeAt: no clickable node found at (" + x + ", " + y + ")");
+            }
+        } catch (Exception e) {
+            AppLog.w("clickNodeAt error: " + e.getMessage());
+        }
+        return false;
+    }
+
+    private AccessibilityNodeInfo findClickableNodeAt(AccessibilityNodeInfo node, int x, int y) {
+        if (node == null) return null;
+        Rect bounds = new Rect();
+        node.getBoundsInScreen(bounds);
+        if (!bounds.contains(x, y)) {
+            return null;
+        }
+        // First check children to find the deepest/most specific clickable element under the pointer
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child != null) {
+                AccessibilityNodeInfo hit = findClickableNodeAt(child, x, y);
+                if (hit != null) return hit;
+            }
+        }
+        if (node.isClickable() || node.isCheckable() || node.isFocusable()) {
+            return node;
+        }
+        return null;
+    }
+
     private void scroll(boolean down) {
         Path scrollPath = new Path();
         float startY = down ? screenHeight * 0.72f : screenHeight * 0.28f;
@@ -265,11 +391,16 @@ final class MouseToggle {
         scrollPath.moveTo(midX, startY);
         scrollPath.lineTo(midX, endY);
         GestureDescription.Builder builder = new GestureDescription.Builder();
+        builder.setDisplayId(Display.DEFAULT_DISPLAY);
         builder.addStroke(new GestureDescription.StrokeDescription(scrollPath, 0, 200));
         service.dispatchGesture(builder.build(), null, null);
     }
 
     void destroy() {
+        dpadUp = false;
+        dpadDown = false;
+        dpadLeft = false;
+        dpadRight = false;
         handler.removeCallbacksAndMessages(null);
         if (viewAttached) {
             try {
