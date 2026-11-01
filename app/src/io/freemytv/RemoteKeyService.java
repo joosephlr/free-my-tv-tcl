@@ -1,6 +1,12 @@
 package io.freemytv;
 
 import android.accessibilityservice.AccessibilityService;
+import android.accessibilityservice.AccessibilityServiceInfo;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.os.Build;
 import android.view.KeyEvent;
 import android.view.accessibility.AccessibilityEvent;
 
@@ -12,9 +18,41 @@ import android.view.accessibility.AccessibilityEvent;
 public class RemoteKeyService extends AccessibilityService {
     private MouseToggle mouseToggle;
 
+    private final BroadcastReceiver toggleReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            AppLog.w("RemoteKeyService toggle broadcast received");
+            getMouseToggle().toggle(true);
+        }
+    };
+
     private MouseToggle getMouseToggle() {
         if (mouseToggle == null) mouseToggle = new MouseToggle(this);
         return mouseToggle;
+    }
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        AppLog.w("RemoteKeyService onCreate");
+        IntentFilter filter = new IntentFilter("io.freemytv.action.TOGGLE_MOUSE");
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(toggleReceiver, filter, Context.RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(toggleReceiver, filter);
+        }
+    }
+
+    @Override
+    protected void onServiceConnected() {
+        super.onServiceConnected();
+        AccessibilityServiceInfo info = getServiceInfo();
+        if (info == null) {
+            info = new AccessibilityServiceInfo();
+        }
+        info.flags |= AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS;
+        setServiceInfo(info);
+        AppLog.w("RemoteKeyService onServiceConnected: flags=" + info.flags);
     }
 
     @Override protected boolean onKeyEvent(KeyEvent event) {
@@ -28,6 +66,9 @@ public class RemoteKeyService extends AccessibilityService {
     @Override public void onInterrupt() {}
 
     @Override public void onDestroy() {
+        try {
+            unregisterReceiver(toggleReceiver);
+        } catch (Exception ignored) {}
         if (mouseToggle != null) {
             mouseToggle.destroy();
             mouseToggle = null;

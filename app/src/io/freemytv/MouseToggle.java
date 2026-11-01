@@ -24,7 +24,7 @@ import android.widget.Toast;
  * the remote's Voice Command / Assistant button (or double-pressing Back while active).
  */
 final class MouseToggle {
-    private static final long DOUBLE_CLICK_WINDOW_MS = 450;
+    private static final long DOUBLE_CLICK_WINDOW_MS = 650;
     private static final long INACTIVITY_TIMEOUT_MS = 60_000;
 
     private final AccessibilityService service;
@@ -66,15 +66,15 @@ final class MouseToggle {
         cursorView = new CursorView(service);
 
         params = new WindowManager.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.WRAP_CONTENT,
+                80,
+                96,
                 WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                         | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT
         );
-        params.gravity = Gravity.TOP | Gravity.START;
+        params.gravity = Gravity.TOP | Gravity.LEFT;
         params.x = (int) cursorX;
         params.y = (int) cursorY;
     }
@@ -87,10 +87,14 @@ final class MouseToggle {
         }
     }
 
-    private static boolean isVoiceKey(int keyCode) {
-        return keyCode == KeyEvent.KEYCODE_VOICE_ASSIST
+    private static final int KEY_TCL_123 = 4056;
+
+    private static boolean isTriggerKey(int keyCode) {
+        return keyCode == KEY_TCL_123
+                || keyCode == KeyEvent.KEYCODE_VOICE_ASSIST
                 || keyCode == KeyEvent.KEYCODE_ASSIST
-                || keyCode == KeyEvent.KEYCODE_SEARCH;
+                || keyCode == KeyEvent.KEYCODE_SEARCH
+                || keyCode == KeyEvent.KEYCODE_MUTE;
     }
 
     boolean onKeyEvent(KeyEvent event) {
@@ -98,20 +102,24 @@ final class MouseToggle {
         int action = event.getAction();
         boolean down = action == KeyEvent.ACTION_DOWN;
 
-        // Check for double-click on Voice button
-        if (isVoiceKey(keyCode)) {
+        // Check for double-click on 123 or Voice button
+        if (isTriggerKey(keyCode)) {
             if (down) {
                 if (event.getRepeatCount() == 0) {
                     long now = SystemClock.uptimeMillis();
                     if (now - lastVoicePressTime <= DOUBLE_CLICK_WINDOW_MS) {
+                        AppLog.w("MouseToggle: double click detected on key " + keyCode);
                         handler.removeCallbacks(singleVoicePressFallback);
                         lastVoicePressTime = 0;
                         toggle(true);
                         return true;
                     } else {
+                        AppLog.w("MouseToggle: first click on key " + keyCode);
                         lastVoicePressTime = now;
-                        handler.removeCallbacks(singleVoicePressFallback);
-                        handler.postDelayed(singleVoicePressFallback, DOUBLE_CLICK_WINDOW_MS);
+                        if (keyCode != KEY_TCL_123) {
+                            handler.removeCallbacks(singleVoicePressFallback);
+                            handler.postDelayed(singleVoicePressFallback, DOUBLE_CLICK_WINDOW_MS);
+                        }
                         return true;
                     }
                 }
@@ -190,39 +198,63 @@ final class MouseToggle {
         }
     }
 
-    private void toggle(boolean showToast) {
+    void toggle(boolean showToast) {
         active = !active;
         AppLog.w("MouseToggle active: " + active);
         handler.removeCallbacks(inactivityTimeout);
-        if (active) {
-            updateScreenDimensions();
-            params.x = (int) cursorX;
-            params.y = (int) cursorY;
-            if (!viewAttached) {
-                try {
-                    windowManager.addView(cursorView, params);
-                    viewAttached = true;
-                } catch (Exception ignored) {}
+        handler.post(() -> {
+            if (active) {
+                updateScreenDimensions();
+                params.x = (int) cursorX;
+                params.y = (int) cursorY;
+                if (!viewAttached) {
+                    try {
+                        windowManager.addView(cursorView, params);
+                        viewAttached = true;
+                        AppLog.w("cursorView attached at (" + params.x + ", " + params.y + ")");
+                    } catch (Exception e) {
+                        AppLog.w("addView failed: " + e.getMessage());
+                    }
+                }
+                handler.postDelayed(inactivityTimeout, INACTIVITY_TIMEOUT_MS);
+                if (showToast) {
+                    try {
+                        Toast.makeText(service.getApplicationContext(), "Modo Mouse ativado", Toast.LENGTH_SHORT).show();
+                    } catch (Exception ignored) {}
+                }
+            } else {
+                if (viewAttached) {
+                    try {
+                        windowManager.removeView(cursorView);
+                        viewAttached = false;
+                        AppLog.w("cursorView detached");
+                    } catch (Exception e) {
+                        AppLog.w("removeView failed: " + e.getMessage());
+                    }
+                }
+                if (showToast) {
+                    try {
+                        Toast.makeText(service.getApplicationContext(), "Modo Mouse desativado", Toast.LENGTH_SHORT).show();
+                    } catch (Exception ignored) {}
+                }
             }
-            handler.postDelayed(inactivityTimeout, INACTIVITY_TIMEOUT_MS);
-            if (showToast) Toast.makeText(service, "Modo Mouse ativado", Toast.LENGTH_SHORT).show();
-        } else {
-            if (viewAttached) {
-                try {
-                    windowManager.removeView(cursorView);
-                    viewAttached = false;
-                } catch (Exception ignored) {}
-            }
-            if (showToast) Toast.makeText(service, "Modo Mouse desativado", Toast.LENGTH_SHORT).show();
-        }
+        });
     }
 
     private void clickAt(float x, float y) {
+        AppLog.w("clickAt (" + x + ", " + y + ")");
         Path clickPath = new Path();
         clickPath.moveTo(x, y);
         GestureDescription.Builder builder = new GestureDescription.Builder();
-        builder.addStroke(new GestureDescription.StrokeDescription(clickPath, 0, 40));
-        service.dispatchGesture(builder.build(), null, null);
+        builder.addStroke(new GestureDescription.StrokeDescription(clickPath, 0, 50));
+        service.dispatchGesture(builder.build(), new AccessibilityService.GestureResultCallback() {
+            @Override public void onCompleted(GestureDescription gestureDescription) {
+                AppLog.w("clickAt completed");
+            }
+            @Override public void onCancelled(GestureDescription gestureDescription) {
+                AppLog.w("clickAt cancelled");
+            }
+        }, handler);
     }
 
     private void scroll(boolean down) {
@@ -269,13 +301,13 @@ final class MouseToggle {
             shadowPaint.setStyle(Paint.Style.FILL);
 
             // Pointer arrow geometry scaled for comfortable TV viewing from the couch:
-            path.moveTo(0, 0);
-            path.lineTo(0, 56);
-            path.lineTo(16, 44);
-            path.lineTo(28, 68);
-            path.lineTo(37, 63);
-            path.lineTo(25, 39);
-            path.lineTo(43, 39);
+            path.moveTo(6, 6);
+            path.lineTo(6, 62);
+            path.lineTo(22, 50);
+            path.lineTo(34, 74);
+            path.lineTo(43, 69);
+            path.lineTo(31, 45);
+            path.lineTo(49, 45);
             path.close();
 
             shadowPath.set(path);
