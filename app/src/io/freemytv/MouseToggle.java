@@ -32,8 +32,10 @@ import java.util.List;
 final class MouseToggle {
     private static final long DOUBLE_CLICK_WINDOW_MS = 650;
     private static final long INACTIVITY_TIMEOUT_MS = 6_000;
-    private static final long HOLD_SCROLL_DELAY_MS = 220;
+    private static final long EDGE_HOLD_DELAY_MS = 150;
     private static final long SCROLL_INTERVAL_MS = 130;
+    private static final float TOP_EDGE_THRESHOLD = 25f;
+    private static final float BOTTOM_EDGE_MARGIN = 35f;
 
     private final AccessibilityService service;
     private final WindowManager windowManager;
@@ -54,8 +56,8 @@ final class MouseToggle {
     private boolean dpadLeft = false;
     private boolean dpadRight = false;
     private long holdStartTime = 0;
+    private long edgeReachTime = 0;
     private long lastScrollTime = 0;
-    private boolean lastScrollSucceeded = false;
     private long okPressDownTime = 0;
 
     private final Runnable singleVoicePressFallback;
@@ -74,42 +76,47 @@ final class MouseToggle {
             // Speed calculation:
             // Starts at 5px per tick (~300px/s) for the first 120ms (fine precision)
             // Accelerates smoothly up to 32px per tick (~1920px/s) over ~1.1 seconds
-            float hSpeed;
+            float speed;
             if (elapsed < 120) {
-                hSpeed = 5.0f;
+                speed = 5.0f;
             } else {
                 float progress = Math.min(1.0f, (elapsed - 120) / 1100f);
-                hSpeed = 5.0f + progress * progress * 27.0f;
+                speed = 5.0f + progress * progress * 27.0f;
             }
 
-            float dx = 0;
-            if (dpadLeft) dx -= hSpeed;
-            if (dpadRight) dx += hSpeed;
-
-            float dy = 0;
-            boolean verticalHeld = dpadUp || dpadDown;
-            if (verticalHeld) {
-                if (elapsed >= HOLD_SCROLL_DELAY_MS) {
-                    // Holding UP or DOWN: continuous scroll
-                    if (now - lastScrollTime >= SCROLL_INTERVAL_MS) {
-                        lastScrollTime = now;
-                        lastScrollSucceeded = performScroll(dpadDown);
-                    }
-                    if (lastScrollSucceeded) {
-                        // While actively scrolling content, drift cursor very gently (~1.5px/tick) so it stays within the list
-                        dy = dpadDown ? 1.5f : -1.5f;
-                    } else {
-                        // Not scrollable or reached list end: move cursor with full acceleration
-                        dy = dpadDown ? hSpeed : -hSpeed;
-                    }
-                } else {
-                    // Quick tap / initial movement: fine-tuning pointer position
-                    dy = dpadDown ? 5.0f : -5.0f;
-                }
-            }
+            float dx = 0, dy = 0;
+            if (dpadUp) dy -= speed;
+            if (dpadDown) dy += speed;
+            if (dpadLeft) dx -= speed;
+            if (dpadRight) dx += speed;
 
             cursorX = Math.max(0, Math.min(screenWidth - 10, cursorX + dx));
             cursorY = Math.max(0, Math.min(screenHeight - 10, cursorY + dy));
+
+            // Edge scroll: only trigger scrolling when cursor reaches the edge of the screen
+            final float bottomEdge = screenHeight - BOTTOM_EDGE_MARGIN;
+            final float topEdge = TOP_EDGE_THRESHOLD;
+
+            if (dpadDown && cursorY >= bottomEdge) {
+                if (edgeReachTime == 0) edgeReachTime = now;
+                if (now - edgeReachTime >= EDGE_HOLD_DELAY_MS) {
+                    if (now - lastScrollTime >= SCROLL_INTERVAL_MS) {
+                        lastScrollTime = now;
+                        performScroll(true);
+                    }
+                }
+            } else if (dpadUp && cursorY <= topEdge) {
+                if (edgeReachTime == 0) edgeReachTime = now;
+                if (now - edgeReachTime >= EDGE_HOLD_DELAY_MS) {
+                    if (now - lastScrollTime >= SCROLL_INTERVAL_MS) {
+                        lastScrollTime = now;
+                        performScroll(false);
+                    }
+                }
+            } else {
+                edgeReachTime = 0;
+                lastScrollTime = 0;
+            }
 
             if (viewAttached) {
                 params.x = (int) cursorX;
@@ -243,16 +250,16 @@ final class MouseToggle {
 
                 boolean isMoving = dpadUp || dpadDown || dpadLeft || dpadRight;
                 if (isMoving) {
-                    if (!wasMoving || (down && (keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN))) {
+                    if (!wasMoving) {
                         holdStartTime = SystemClock.uptimeMillis();
+                        edgeReachTime = 0;
                         lastScrollTime = 0;
-                        lastScrollSucceeded = false;
                         handler.removeCallbacks(moveLoop);
                         moveLoop.run();
                     }
                 } else {
+                    edgeReachTime = 0;
                     lastScrollTime = 0;
-                    lastScrollSucceeded = false;
                     handler.removeCallbacks(moveLoop);
                 }
                 return true;
@@ -631,8 +638,8 @@ final class MouseToggle {
         dpadDown = false;
         dpadLeft = false;
         dpadRight = false;
+        edgeReachTime = 0;
         lastScrollTime = 0;
-        lastScrollSucceeded = false;
         handler.removeCallbacksAndMessages(null);
         if (viewAttached) {
             try {
