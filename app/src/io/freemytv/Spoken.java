@@ -1,6 +1,7 @@
 package io.freemytv;
 
 import android.content.Context;
+import android.os.Build;
 import android.graphics.Rect;
 import android.os.Bundle;
 import android.os.SystemClock;
@@ -37,6 +38,8 @@ final class Spoken extends AccessibilityNodeProvider {
         void click(int id);
         /** False for what is only there to be read (a widget): it takes the focus, so TalkBack gets to it, but OK does nothing. */
         default boolean clickable(int id) { return true; }
+        /** Scroll (direction > 0 forward/down, < 0 backward/up). */
+        default boolean scroll(int direction) { return false; }
     }
 
     /** TalkBack's click and the remote's OK can both arrive for one press: only the first counts. */
@@ -91,6 +94,13 @@ final class Spoken extends AccessibilityNodeProvider {
         if (id == HOST_VIEW_ID) {
             AccessibilityNodeInfo info = AccessibilityNodeInfo.obtain(host);
             host.onInitializeAccessibilityNodeInfo(info);
+            info.setScrollable(true);
+            info.addAction(AccessibilityAction.ACTION_SCROLL_FORWARD);
+            info.addAction(AccessibilityAction.ACTION_SCROLL_BACKWARD);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                info.addAction(AccessibilityAction.ACTION_SCROLL_DOWN);
+                info.addAction(AccessibilityAction.ACTION_SCROLL_UP);
+            }
             ids.clear();
             source.items(ids);
             for (int item : ids) if (source.bounds(item, bounds)) info.addChild(host, item);
@@ -123,7 +133,19 @@ final class Spoken extends AccessibilityNodeProvider {
     }
 
     @Override public boolean performAction(int id, int action, Bundle arguments) {
-        if (id == HOST_VIEW_ID) return host.performAccessibilityAction(action, arguments);
+        if (id == HOST_VIEW_ID) {
+            if (action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                    || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                        && action == AccessibilityAction.ACTION_SCROLL_DOWN.getId())) {
+                return source.scroll(1);
+            }
+            if (action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                    || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                        && action == AccessibilityAction.ACTION_SCROLL_UP.getId())) {
+                return source.scroll(-1);
+            }
+            return host.performAccessibilityAction(action, arguments);
+        }
         if (action == AccessibilityNodeInfo.ACTION_CLICK && !source.clickable(id)) return false;
         switch (action) {
             case AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS:

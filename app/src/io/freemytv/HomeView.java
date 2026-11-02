@@ -144,6 +144,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         @Override public void focus(int id) { a11yFocus(id); }
         @Override public void click(int id) { activate(); }
         @Override public boolean clickable(int id) { return (id - 1) / 1000 != WIDGETS; }
+        @Override public boolean scroll(int direction) { return a11yScroll(direction); }
     });
     private final RectF a11yRect = new RectF();
     private final Layer sky, heroLayer, status, platter, tiles, drawerLayer, sheetLayer, toastLayer;
@@ -2985,6 +2986,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         else if (a11yRect.bottom <= edge) a11yRect.set(a11yRect.left, 0, a11yRect.right, edge);
         a11yRect.round(out);
         return out.width() > 0 && out.height() > 0;
+    }
+
+    private boolean a11yScroll(int direction) {
+        wake();
+        handleScroll(direction > 0 ? -1.0f : 1.0f);
+        return true;
     }
 
     private int a11yFocused() {

@@ -32,8 +32,8 @@ import java.util.List;
 final class MouseToggle {
     private static final long DOUBLE_CLICK_WINDOW_MS = 650;
     private static final long INACTIVITY_TIMEOUT_MS = 6_000;
-    private static final long EDGE_HOLD_DELAY_MS = 150;
-    private static final long SCROLL_INTERVAL_MS = 130;
+    private static final long EDGE_HOLD_DELAY_MS = 140;
+    private static final long SCROLL_INTERVAL_MS = 280;
     private static final float TOP_EDGE_THRESHOLD = 25f;
     private static final float BOTTOM_EDGE_MARGIN = 35f;
 
@@ -457,28 +457,57 @@ final class MouseToggle {
     boolean performScroll(boolean down) {
         AppLog.w("performScroll: down=" + down + " at (" + cursorX + ", " + cursorY + ")");
         AccessibilityNodeInfo root = getActiveRootNode();
-        if (root != null) {
-            // 1. Check for scrollable container directly under the cursor tip
-            AccessibilityNodeInfo leaf = findNodeAt(root, (int) (cursorX + 6), (int) (cursorY + 6));
-            AccessibilityNodeInfo scrollTarget = findScrollableAncestor(leaf, true);
-            if (scrollTarget != null) {
-                boolean ok = performScrollAction(scrollTarget, down);
-                AppLog.w("performScroll: on ancestor " + scrollTarget.getClassName() + " -> " + ok);
-                if (ok) return true;
-            }
-
-            // 2. Fallback to any visible scrollable container on screen
-            AccessibilityNodeInfo anyTarget = findAnyScrollableNode(root, true);
-            if (anyTarget != null && anyTarget != scrollTarget) {
-                boolean ok = performScrollAction(anyTarget, down);
-                AppLog.w("performScroll: on anyTarget " + anyTarget.getClassName() + " -> " + ok);
-                if (ok) return true;
-            }
+        if (root == null) {
+            scrollGesture(down);
+            return false;
         }
 
-        // 3. Fallback to gesture drag
+        // 1. Check under cursor
+        AccessibilityNodeInfo leaf = findNodeAt(root, (int) (cursorX + 6), (int) (cursorY + 6));
+        AccessibilityNodeInfo target1 = getBestScrollTarget(findScrollableAncestor(leaf, true), true);
+        if (target1 != null) {
+            boolean ok = performScrollAction(target1, down);
+            AppLog.w("performScroll: on target1 " + target1.getClassName() + " (" + target1.getViewIdResourceName() + ") -> " + ok);
+            if (ok) return true;
+        }
+
+        // 2. Check middle of content area along cursor's column (avoids top/bottom nav bars)
+        float midY = screenHeight * 0.5f;
+        AccessibilityNodeInfo midLeaf = findNodeAt(root, (int) (cursorX + 6), (int) midY);
+        AccessibilityNodeInfo target2 = getBestScrollTarget(findScrollableAncestor(midLeaf, true), true);
+        if (target2 != null && target2 != target1) {
+            boolean ok = performScrollAction(target2, down);
+            AppLog.w("performScroll: on target2 " + target2.getClassName() + " (" + target2.getViewIdResourceName() + ") -> " + ok);
+            if (ok) return true;
+        }
+
+        // 3. Check screen center (screenWidth * 0.5f, screenHeight * 0.5f)
+        float midX = screenWidth * 0.5f;
+        AccessibilityNodeInfo centerLeaf = findNodeAt(root, (int) midX, (int) midY);
+        AccessibilityNodeInfo target3 = getBestScrollTarget(findScrollableAncestor(centerLeaf, true), true);
+        if (target3 != null && target3 != target1 && target3 != target2) {
+            boolean ok = performScrollAction(target3, down);
+            AppLog.w("performScroll: on target3 " + target3.getClassName() + " (" + target3.getViewIdResourceName() + ") -> " + ok);
+            if (ok) return true;
+        }
+
+        // 4. Find deepest scrollable container in the entire window (prioritizes inner RecyclerView over outer CoordinatorLayout)
+        AccessibilityNodeInfo target4 = findDeepestScrollableNode(root, true);
+        if (target4 != null && target4 != target1 && target4 != target2 && target4 != target3) {
+            boolean ok = performScrollAction(target4, down);
+            AppLog.w("performScroll: on target4 " + target4.getClassName() + " (" + target4.getViewIdResourceName() + ") -> " + ok);
+            if (ok) return true;
+        }
+
+        // 5. Fallback: gesture scroll
         scrollGesture(down);
         return false;
+    }
+
+    private AccessibilityNodeInfo getBestScrollTarget(AccessibilityNodeInfo candidate, boolean vertical) {
+        if (candidate == null) return null;
+        AccessibilityNodeInfo deep = findDeepestScrollableNode(candidate, vertical);
+        return deep != null ? deep : candidate;
     }
 
     private AccessibilityNodeInfo findNodeAt(AccessibilityNodeInfo node, int x, int y) {
@@ -511,18 +540,33 @@ final class MouseToggle {
         return null;
     }
 
-    private AccessibilityNodeInfo findAnyScrollableNode(AccessibilityNodeInfo node, boolean vertical) {
+    private AccessibilityNodeInfo findDeepestScrollableNode(AccessibilityNodeInfo node, boolean vertical) {
         if (node == null) return null;
-        if (isNodeScrollable(node, vertical)) {
-            return node;
+
+        CharSequence className = node.getClassName();
+        String name = className != null ? className.toString() : "";
+
+        // If this node is already a scrollable list container, it is the leaf list - don't scan its 100s of child items!
+        if (name.contains("RecyclerView") || name.contains("VerticalGridView") || name.contains("ListView")) {
+            if (isNodeScrollable(node, vertical)) {
+                return node;
+            }
         }
+
+        // Search children so inner RecyclerView is preferred over outer CoordinatorLayout/ScrollView
         for (int i = 0; i < node.getChildCount(); i++) {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child != null) {
-                AccessibilityNodeInfo hit = findAnyScrollableNode(child, vertical);
-                if (hit != null) return hit;
+                AccessibilityNodeInfo deepHit = findDeepestScrollableNode(child, vertical);
+                if (deepHit != null) return deepHit;
             }
         }
+
+        // If no child is scrollable, check if this node itself is scrollable
+        if (isNodeScrollable(node, vertical)) {
+            return node;
+        }
+
         return null;
     }
 
@@ -595,27 +639,42 @@ final class MouseToggle {
 
     private boolean performScrollAction(AccessibilityNodeInfo node, boolean down) {
         if (node == null) return false;
-        boolean success = false;
         try {
-            if (down) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    success = node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.getId());
-                }
-                if (!success) {
-                    success = node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD);
-                }
-            } else {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    success = node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.getId());
-                }
-                if (!success) {
-                    success = node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD);
+            int targetAction = down ? AccessibilityNodeInfo.ACTION_SCROLL_FORWARD : AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD;
+            int specificAction = down
+                    ? (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.getId() : 0)
+                    : (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.getId() : 0);
+
+            boolean hasSpecific = false;
+            boolean hasForwardBackward = false;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                for (AccessibilityNodeInfo.AccessibilityAction a : node.getActionList()) {
+                    if (a.getId() == specificAction) hasSpecific = true;
+                    if (a.getId() == targetAction) hasForwardBackward = true;
                 }
             }
+
+            int actionsMask = node.getActions();
+            if ((actionsMask & targetAction) != 0) {
+                hasForwardBackward = true;
+            }
+
+            if (hasSpecific) {
+                boolean ok = node.performAction(specificAction);
+                if (ok) return true;
+            }
+
+            if (hasForwardBackward) {
+                boolean ok = node.performAction(targetAction);
+                if (ok) return true;
+            }
+
+            if (node.performAction(targetAction)) return true;
+            if (specificAction != 0 && node.performAction(specificAction)) return true;
         } catch (Exception e) {
             AppLog.w("performScrollAction error: " + e.getMessage());
         }
-        return success;
+        return false;
     }
 
     private void scrollGesture(boolean down) {
