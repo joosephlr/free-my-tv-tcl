@@ -27,6 +27,10 @@ public class RemoteKeyService extends AccessibilityService {
                 getMouseToggle().toggle(true);
             } else if ("io.freemytv.action.TEST_CLICK".equals(action)) {
                 getMouseToggle().testClick();
+            } else if ("io.freemytv.action.TEST_SCROLL_DOWN".equals(action)) {
+                getMouseToggle().performScroll(true);
+            } else if ("io.freemytv.action.TEST_SCROLL_UP".equals(action)) {
+                getMouseToggle().performScroll(false);
             }
         }
     };
@@ -43,6 +47,8 @@ public class RemoteKeyService extends AccessibilityService {
         IntentFilter filter = new IntentFilter();
         filter.addAction("io.freemytv.action.TOGGLE_MOUSE");
         filter.addAction("io.freemytv.action.TEST_CLICK");
+        filter.addAction("io.freemytv.action.TEST_SCROLL_DOWN");
+        filter.addAction("io.freemytv.action.TEST_SCROLL_UP");
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(toggleReceiver, filter, Context.RECEIVER_EXPORTED);
         } else {
@@ -58,6 +64,7 @@ public class RemoteKeyService extends AccessibilityService {
             info = new AccessibilityServiceInfo();
         }
         info.flags |= AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS;
+        info.flags |= AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS;
         setServiceInfo(info);
         AppLog.w("RemoteKeyService onServiceConnected: flags=" + info.flags);
     }

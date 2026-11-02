@@ -10,6 +10,7 @@ import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -20,7 +21,9 @@ import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
 import android.widget.Toast;
+import java.util.List;
 
 /**
  * Simulates a virtual mouse cursor driven by the remote's D-Pad arrows, toggled by double-pressing
@@ -29,6 +32,8 @@ import android.widget.Toast;
 final class MouseToggle {
     private static final long DOUBLE_CLICK_WINDOW_MS = 650;
     private static final long INACTIVITY_TIMEOUT_MS = 6_000;
+    private static final long HOLD_SCROLL_DELAY_MS = 220;
+    private static final long SCROLL_INTERVAL_MS = 130;
 
     private final AccessibilityService service;
     private final WindowManager windowManager;
@@ -49,6 +54,8 @@ final class MouseToggle {
     private boolean dpadLeft = false;
     private boolean dpadRight = false;
     private long holdStartTime = 0;
+    private long lastScrollTime = 0;
+    private boolean lastScrollSucceeded = false;
     private long okPressDownTime = 0;
 
     private final Runnable singleVoicePressFallback;
@@ -67,19 +74,39 @@ final class MouseToggle {
             // Speed calculation:
             // Starts at 5px per tick (~300px/s) for the first 120ms (fine precision)
             // Accelerates smoothly up to 32px per tick (~1920px/s) over ~1.1 seconds
-            float speed;
+            float hSpeed;
             if (elapsed < 120) {
-                speed = 5.0f;
+                hSpeed = 5.0f;
             } else {
                 float progress = Math.min(1.0f, (elapsed - 120) / 1100f);
-                speed = 5.0f + progress * progress * 27.0f;
+                hSpeed = 5.0f + progress * progress * 27.0f;
             }
 
-            float dx = 0, dy = 0;
-            if (dpadUp) dy -= speed;
-            if (dpadDown) dy += speed;
-            if (dpadLeft) dx -= speed;
-            if (dpadRight) dx += speed;
+            float dx = 0;
+            if (dpadLeft) dx -= hSpeed;
+            if (dpadRight) dx += hSpeed;
+
+            float dy = 0;
+            boolean verticalHeld = dpadUp || dpadDown;
+            if (verticalHeld) {
+                if (elapsed >= HOLD_SCROLL_DELAY_MS) {
+                    // Holding UP or DOWN: continuous scroll
+                    if (now - lastScrollTime >= SCROLL_INTERVAL_MS) {
+                        lastScrollTime = now;
+                        lastScrollSucceeded = performScroll(dpadDown);
+                    }
+                    if (lastScrollSucceeded) {
+                        // While actively scrolling content, drift cursor very gently (~1.5px/tick) so it stays within the list
+                        dy = dpadDown ? 1.5f : -1.5f;
+                    } else {
+                        // Not scrollable or reached list end: move cursor with full acceleration
+                        dy = dpadDown ? hSpeed : -hSpeed;
+                    }
+                } else {
+                    // Quick tap / initial movement: fine-tuning pointer position
+                    dy = dpadDown ? 5.0f : -5.0f;
+                }
+            }
 
             cursorX = Math.max(0, Math.min(screenWidth - 10, cursorX + dx));
             cursorY = Math.max(0, Math.min(screenHeight - 10, cursorY + dy));
@@ -216,12 +243,16 @@ final class MouseToggle {
 
                 boolean isMoving = dpadUp || dpadDown || dpadLeft || dpadRight;
                 if (isMoving) {
-                    if (!wasMoving) {
+                    if (!wasMoving || (down && (keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_DPAD_DOWN))) {
                         holdStartTime = SystemClock.uptimeMillis();
+                        lastScrollTime = 0;
+                        lastScrollSucceeded = false;
                         handler.removeCallbacks(moveLoop);
                         moveLoop.run();
                     }
                 } else {
+                    lastScrollTime = 0;
+                    lastScrollSucceeded = false;
                     handler.removeCallbacks(moveLoop);
                 }
                 return true;
@@ -243,12 +274,12 @@ final class MouseToggle {
 
             case KeyEvent.KEYCODE_PAGE_UP:
             case KeyEvent.KEYCODE_CHANNEL_UP:
-                if (down && event.getRepeatCount() == 0) scroll(false);
+                if (down && event.getRepeatCount() == 0) performScroll(false);
                 return true;
 
             case KeyEvent.KEYCODE_PAGE_DOWN:
             case KeyEvent.KEYCODE_CHANNEL_DOWN:
-                if (down && event.getRepeatCount() == 0) scroll(true);
+                if (down && event.getRepeatCount() == 0) performScroll(true);
                 return true;
 
             default:
@@ -332,11 +363,41 @@ final class MouseToggle {
         }, handler);
     }
 
-    private boolean clickNodeAt(float x, float y, boolean longPress) {
+    private AccessibilityNodeInfo getActiveRootNode() {
         try {
             AccessibilityNodeInfo root = service.getRootInActiveWindow();
+            if (root != null) return root;
+        } catch (Exception ignored) {}
+
+        try {
+            List<AccessibilityWindowInfo> windows = service.getWindows();
+            if (windows != null) {
+                for (AccessibilityWindowInfo w : windows) {
+                    if (w.isFocused() || w.isActive()) {
+                        AccessibilityNodeInfo root = w.getRoot();
+                        if (root != null) return root;
+                    }
+                }
+                for (AccessibilityWindowInfo w : windows) {
+                    if (w.getType() == AccessibilityWindowInfo.TYPE_APPLICATION) {
+                        AccessibilityNodeInfo root = w.getRoot();
+                        if (root != null) return root;
+                    }
+                }
+                for (AccessibilityWindowInfo w : windows) {
+                    AccessibilityNodeInfo root = w.getRoot();
+                    if (root != null) return root;
+                }
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    private boolean clickNodeAt(float x, float y, boolean longPress) {
+        try {
+            AccessibilityNodeInfo root = getActiveRootNode();
             if (root == null) {
-                AppLog.w("clickNodeAt: getRootInActiveWindow returned null");
+                AppLog.w("clickNodeAt: root is null");
                 return false;
             }
             AccessibilityNodeInfo target = findClickableNodeAt(root, (int) x, (int) y);
@@ -386,17 +447,183 @@ final class MouseToggle {
         return null;
     }
 
-    private void scroll(boolean down) {
-        Path scrollPath = new Path();
-        float startY = down ? screenHeight * 0.72f : screenHeight * 0.28f;
-        float endY = down ? screenHeight * 0.28f : screenHeight * 0.72f;
-        float midX = screenWidth * 0.5f;
-        scrollPath.moveTo(midX, startY);
-        scrollPath.lineTo(midX, endY);
-        GestureDescription.Builder builder = new GestureDescription.Builder();
-        builder.setDisplayId(Display.DEFAULT_DISPLAY);
-        builder.addStroke(new GestureDescription.StrokeDescription(scrollPath, 0, 200));
-        service.dispatchGesture(builder.build(), null, null);
+    boolean performScroll(boolean down) {
+        AppLog.w("performScroll: down=" + down + " at (" + cursorX + ", " + cursorY + ")");
+        AccessibilityNodeInfo root = getActiveRootNode();
+        if (root != null) {
+            // 1. Check for scrollable container directly under the cursor tip
+            AccessibilityNodeInfo leaf = findNodeAt(root, (int) (cursorX + 6), (int) (cursorY + 6));
+            AccessibilityNodeInfo scrollTarget = findScrollableAncestor(leaf, true);
+            if (scrollTarget != null) {
+                boolean ok = performScrollAction(scrollTarget, down);
+                AppLog.w("performScroll: on ancestor " + scrollTarget.getClassName() + " -> " + ok);
+                if (ok) return true;
+            }
+
+            // 2. Fallback to any visible scrollable container on screen
+            AccessibilityNodeInfo anyTarget = findAnyScrollableNode(root, true);
+            if (anyTarget != null && anyTarget != scrollTarget) {
+                boolean ok = performScrollAction(anyTarget, down);
+                AppLog.w("performScroll: on anyTarget " + anyTarget.getClassName() + " -> " + ok);
+                if (ok) return true;
+            }
+        }
+
+        // 3. Fallback to gesture drag
+        scrollGesture(down);
+        return false;
+    }
+
+    private AccessibilityNodeInfo findNodeAt(AccessibilityNodeInfo node, int x, int y) {
+        if (node == null) return null;
+        Rect bounds = new Rect();
+        node.getBoundsInScreen(bounds);
+        if (!bounds.contains(x, y)) {
+            return null;
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child != null) {
+                AccessibilityNodeInfo hit = findNodeAt(child, x, y);
+                if (hit != null) return hit;
+            }
+        }
+        return node;
+    }
+
+    private AccessibilityNodeInfo findScrollableAncestor(AccessibilityNodeInfo node, boolean vertical) {
+        AccessibilityNodeInfo current = node;
+        int depth = 0;
+        while (current != null && depth < 20) {
+            if (isNodeScrollable(current, vertical)) {
+                return current;
+            }
+            current = current.getParent();
+            depth++;
+        }
+        return null;
+    }
+
+    private AccessibilityNodeInfo findAnyScrollableNode(AccessibilityNodeInfo node, boolean vertical) {
+        if (node == null) return null;
+        if (isNodeScrollable(node, vertical)) {
+            return node;
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child != null) {
+                AccessibilityNodeInfo hit = findAnyScrollableNode(child, vertical);
+                if (hit != null) return hit;
+            }
+        }
+        return null;
+    }
+
+    private boolean isNodeScrollable(AccessibilityNodeInfo node, boolean vertical) {
+        if (node == null) return false;
+
+        CharSequence className = node.getClassName();
+        String name = className != null ? className.toString() : "";
+
+        if (vertical && (name.contains("HorizontalScrollView") || name.contains("HorizontalGridView"))) {
+            return false;
+        }
+        if (!vertical && name.contains("VerticalGridView")) {
+            return false;
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            for (AccessibilityNodeInfo.AccessibilityAction action : node.getActionList()) {
+                int id = action.getId();
+                if (vertical) {
+                    if (id == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.getId()
+                            || id == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.getId()) {
+                        return true;
+                    }
+                } else {
+                    if (id == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT.getId()
+                            || id == AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.getId()) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        if (node.isScrollable()) {
+            if (vertical) {
+                Rect bounds = new Rect();
+                node.getBoundsInScreen(bounds);
+                if (bounds.height() > 0 && bounds.width() > 0) {
+                    if (bounds.height() < 250 && bounds.width() > bounds.height() * 3) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        if (vertical) {
+            if (name.contains("VerticalGridView")
+                    || name.contains("ScrollView")
+                    || name.contains("ListView")
+                    || name.contains("RecyclerView")
+                    || name.contains("WebView")) {
+                return true;
+            }
+        } else {
+            if (name.contains("HorizontalScrollView")
+                    || name.contains("HorizontalGridView")) {
+                return true;
+            }
+        }
+
+        int actions = node.getActions();
+        if ((actions & AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) != 0
+                || (actions & AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD) != 0) {
+            return true;
+        }
+
+        return false;
+    }
+
+    private boolean performScrollAction(AccessibilityNodeInfo node, boolean down) {
+        if (node == null) return false;
+        boolean success = false;
+        try {
+            if (down) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    success = node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.getId());
+                }
+                if (!success) {
+                    success = node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD);
+                }
+            } else {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    success = node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.getId());
+                }
+                if (!success) {
+                    success = node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD);
+                }
+            }
+        } catch (Exception e) {
+            AppLog.w("performScrollAction error: " + e.getMessage());
+        }
+        return success;
+    }
+
+    private void scrollGesture(boolean down) {
+        try {
+            Path scrollPath = new Path();
+            float startY = down ? screenHeight * 0.72f : screenHeight * 0.28f;
+            float endY = down ? screenHeight * 0.28f : screenHeight * 0.72f;
+            float midX = screenWidth * 0.5f;
+            scrollPath.moveTo(midX, startY);
+            scrollPath.lineTo(midX, endY);
+            GestureDescription.Builder builder = new GestureDescription.Builder();
+            builder.setDisplayId(Display.DEFAULT_DISPLAY);
+            builder.addStroke(new GestureDescription.StrokeDescription(scrollPath, 0, 180));
+            service.dispatchGesture(builder.build(), null, handler);
+        } catch (Exception ignored) {}
     }
 
     void destroy() {
@@ -404,6 +631,8 @@ final class MouseToggle {
         dpadDown = false;
         dpadLeft = false;
         dpadRight = false;
+        lastScrollTime = 0;
+        lastScrollSucceeded = false;
         handler.removeCallbacksAndMessages(null);
         if (viewAttached) {
             try {
