@@ -305,13 +305,19 @@ final class MouseToggle {
         dpadDown = false;
         dpadLeft = false;
         dpadRight = false;
+        edgeReachTime = 0;
+        lastScrollTime = 0;
+        holdStartTime = 0;
         handler.removeCallbacks(moveLoop);
         handler.removeCallbacks(inactivityTimeout);
         handler.post(() -> {
             if (active) {
                 updateScreenDimensions();
+                cursorX = screenWidth / 2f;
+                cursorY = screenHeight / 2f;
                 params.x = (int) cursorX;
                 params.y = (int) cursorY;
+                cursorView.setPressed(false);
                 if (!viewAttached) {
                     try {
                         windowManager.addView(cursorView, params);
@@ -320,6 +326,10 @@ final class MouseToggle {
                     } catch (Exception e) {
                         AppLog.w("addView failed: " + e.getMessage());
                     }
+                } else {
+                    try {
+                        windowManager.updateViewLayout(cursorView, params);
+                    } catch (Exception ignored) {}
                 }
                 handler.postDelayed(inactivityTimeout, INACTIVITY_TIMEOUT_MS);
                 if (showToast) {
